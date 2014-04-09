@@ -164,6 +164,52 @@ class Producer(object):
             if self.proc.is_alive():
                 self.proc.terminate()
 
+class UserProducer(Producer):
+    """
+    A simple, round-robbin producer for users. Each user goes to exactly one partition
+
+
+    Params:
+    client - The Kafka client instance to use
+    topic - The topic of the messages
+    users - Pre-defined user-partitions
+    partitions - A list of partitions for users
+    async - If True, the messages are sent asynchronously via another
+            thread (process). We will not wait for a response to these
+    req_acks - A value indicating the acknowledgements that the server must
+               receive before responding to the request
+    ack_timeout - Value (in milliseconds) indicating a timeout for waiting
+                  for an acknowledgement
+    batch_send - If True, messages are send in batches
+    batch_send_every_n - If set, messages are send in batches of this size
+    batch_send_every_t - If set, messages are send after this timeout
+    """
+    def __init__(self, client, topic, users={}, partitions=[], async=False,
+                 req_acks=Producer.ACK_AFTER_LOCAL_WRITE,
+                 ack_timeout=Producer.DEFAULT_ACK_TIMEOUT,
+                 batch_send=False,
+                 batch_send_every_n=BATCH_SEND_MSG_COUNT,
+                 batch_send_every_t=BATCH_SEND_DEFAULT_INTERVAL):
+        super(UserProducer, self).__init__(client, async, req_acks,
+                                             ack_timeout, batch_send,
+                                             batch_send_every_n,
+                                             batch_send_every_t)
+        if topic not in self.client.topic_partitions:
+            self.client.load_metadata_for_topics(topic)
+        if not partitions:
+            self.partition_cycles = cycle(self.client.topic_partitions[topic])
+        else:
+            self.partition_cycles = cycle(partitions)
+        self.users = users
+        self.topic = topic
+
+    def send(self, userId, *msg):
+        if userId not in self.users:
+            self.users[userId] = self.partition_cycles.next()
+        return super(UserProducer, self).send_messages(self.topic, self.users[userId], *msg)
+
+    def __repr__(self):
+        return '<UserProducer batch=%s>' % self.async
 
 class SimpleProducer(Producer):
     """
