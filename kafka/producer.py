@@ -211,6 +211,46 @@ class UserProducer(Producer):
     def __repr__(self):
         return '<UserProducer batch=%s>' % self.async
 
+class BroadcastProducer(Producer):
+    """
+    A producer broadcast the message to all partitions
+
+
+    Params:
+    client - The Kafka client instance to use
+    topic - The topic of the messages
+    async - If True, the messages are sent asynchronously via another
+            thread (process). We will not wait for a response to these
+    req_acks - A value indicating the acknowledgements that the server must
+               receive before responding to the request
+    ack_timeout - Value (in milliseconds) indicating a timeout for waiting
+                  for an acknowledgement
+    batch_send - If True, messages are send in batches
+    batch_send_every_n - If set, messages are send in batches of this size
+    batch_send_every_t - If set, messages are send after this timeout
+    """
+    def __init__(self, client, topic, async=False,
+                 req_acks=Producer.ACK_AFTER_LOCAL_WRITE,
+                 ack_timeout=Producer.DEFAULT_ACK_TIMEOUT,
+                 batch_send=False,
+                 batch_send_every_n=BATCH_SEND_MSG_COUNT,
+                 batch_send_every_t=BATCH_SEND_DEFAULT_INTERVAL):
+        super(BroadcastProducer, self).__init__(client, async, req_acks,
+                                                ack_timeout, batch_send,
+                                                batch_send_every_n,
+                                                batch_send_every_t)
+        if topic not in self.client.topic_partitions:
+            self.client.load_metadata_for_topics(topic)
+        self.partitions = self.client.topic_partitions[topic]
+        self.topic = topic
+
+    def send(self, *msg):
+        sendmessage = super(BroadcastProducer, self).send_messages
+        return [sendmessage(self.topic, partition, *msg) for partition in self.partitions]
+
+    def __repr__(self):
+        return '<BroadcastProducer batch=%s>' % self.async
+
 class SimpleProducer(Producer):
     """
     A simple, round-robbin producer. Each message goes to exactly one partition
