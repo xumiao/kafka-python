@@ -8,8 +8,9 @@ from kafka.codec import (
 from kafka.common import (
     BrokerMetadata, PartitionMetadata, Message, OffsetAndMessage,
     ProduceResponse, FetchResponse, OffsetResponse,
-    OffsetCommitResponse, OffsetFetchResponse,
-    BufferUnderflowError, ChecksumError, ConsumerFetchSizeTooSmall
+    OffsetCommitResponse, OffsetFetchResponse, ProtocolError,
+    BufferUnderflowError, ChecksumError, ConsumerFetchSizeTooSmall,
+    UnsupportedCodecError
 )
 from kafka.util import (
     read_short_string, read_int_string, relative_unpack,
@@ -17,6 +18,12 @@ from kafka.util import (
 )
 
 log = logging.getLogger("kafka")
+
+ATTRIBUTE_CODEC_MASK = 0x03
+CODEC_NONE = 0x00
+CODEC_GZIP = 0x01
+CODEC_SNAPPY = 0x02
+ALL_CODECS = (CODEC_NONE, CODEC_GZIP, CODEC_SNAPPY)
 
 
 class KafkaProtocol(object):
@@ -32,11 +39,6 @@ class KafkaProtocol(object):
     OFFSET_COMMIT_KEY = 8
     OFFSET_FETCH_KEY = 9
 
-    ATTRIBUTE_CODEC_MASK = 0x03
-    CODEC_NONE = 0x00
-    CODEC_GZIP = 0x01
-    CODEC_SNAPPY = 0x02
-
     ###################
     #   Private API   #
     ###################
@@ -50,7 +52,7 @@ class KafkaProtocol(object):
                            request_key,          # ApiKey
                            0,                    # ApiVersion
                            correlation_id,       # CorrelationId
-                           len(client_id),
+                           len(client_id),       # ClientId size
                            client_id)            # ClientId
 
     @classmethod
@@ -68,8 +70,7 @@ class KafkaProtocol(object):
         message_set = ""
         for message in messages:
             encoded_message = KafkaProtocol._encode_message(message)
-            message_set += struct.pack('>qi%ds' % len(encoded_message), 0,
-                                       len(encoded_message), encoded_message)
+            message_set += struct.pack('>qi%ds' % len(encoded_message), 0, len(encoded_message), encoded_message)
         return message_set
 
     @classmethod
@@ -96,7 +97,7 @@ class KafkaProtocol(object):
             crc = zlib.crc32(msg)
             msg = struct.pack('>i%ds' % len(msg), crc, msg)
         else:
-            raise Exception("Unexpected magic number: %d" % message.magic)
+            raise ProtocolError("Unexpected magic number: %d" % message.magic)
         return msg
 
     @classmethod
@@ -151,17 +152,17 @@ class KafkaProtocol(object):
         (key, cur) = read_int_string(data, cur)
         (value, cur) = read_int_string(data, cur)
 
-        codec = att & KafkaProtocol.ATTRIBUTE_CODEC_MASK
+        codec = att & ATTRIBUTE_CODEC_MASK
 
-        if codec == KafkaProtocol.CODEC_NONE:
+        if codec == CODEC_NONE:
             yield (offset, Message(magic, att, key, value))
 
-        elif codec == KafkaProtocol.CODEC_GZIP:
+        elif codec == CODEC_GZIP:
             gz = gzip_decode(value)
             for (offset, msg) in KafkaProtocol._decode_message_set_iter(gz):
                 yield (offset, msg)
 
-        elif codec == KafkaProtocol.CODEC_SNAPPY:
+        elif codec == CODEC_SNAPPY:
             snp = snappy_decode(value)
             for (offset, msg) in KafkaProtocol._decode_message_set_iter(snp):
                 yield (offset, msg)
@@ -544,7 +545,7 @@ def create_gzip_message(payloads, key=None):
         [create_message(payload) for payload in payloads])
 
     gzipped = gzip_encode(message_set)
-    codec = KafkaProtocol.ATTRIBUTE_CODEC_MASK & KafkaProtocol.CODEC_GZIP
+    codec = ATTRIBUTE_CODEC_MASK & CODEC_GZIP
 
     return Message(0, 0x00 | codec, key, gzipped)
 
@@ -565,6 +566,22 @@ def create_snappy_message(payloads, key=None):
         [create_message(payload) for payload in payloads])
 
     snapped = snappy_encode(message_set)
-    codec = KafkaProtocol.ATTRIBUTE_CODEC_MASK & KafkaProtocol.CODEC_SNAPPY
+    codec = ATTRIBUTE_CODEC_MASK & CODEC_SNAPPY
 
     return Message(0, 0x00 | codec, key, snapped)
+
+
+def create_message_set(messages, codec=CODEC_NONE):
+    """Create a message set using the given codec.
+
+    If codec is CODEC_NONE, return a list of raw Kafka messages. Otherwise,
+    return a list containing a single codec-encoded message.
+    """
+    if codec == CODEC_NONE:
+        return [create_message(m) for m in messages]
+    elif codec == CODEC_GZIP:
+        return [create_gzip_message(messages)]
+    elif codec == CODEC_SNAPPY:
+        return [create_snappy_message(messages)]
+    else:
+        raise UnsupportedCodecError("Codec 0x%02x unsupported" % codec)
